@@ -23,20 +23,20 @@ Transition = namedtuple("Transition", ("state", "action", "reward", "next_state"
 GAMMA = 0.99                 
 TAU_ACTOR = 1e-1             
 TAU_CRITIC = 1e-3            
-LR_ACTOR = 1e-4              
-LR_CRITIC = 1e-3             
+LR_ACTOR = 1e-6              
+LR_CRITIC = 5e-5             
 WEIGHT_DECAY_ACTOR = 0       
 WEIGHT_DECAY_CRITIC = 1e-2   
-BATCH_SIZE = 128             
+BATCH_SIZE = 512             
 BUFFER_SIZE = int(1e6)       
 PRETRAIN = 256               
 MAX_STEP = 100               
 WEIGHTS = "portfolio_weights/"  
 
 # Dimensioni dei layer nelle reti
-FC1_UNITS_ACTOR = 256        
-FC2_UNITS_ACTOR = 128        
-FC3_UNITS_ACTOR = 64         
+FC1_UNITS_ACTOR = 128        
+FC2_UNITS_ACTOR = 64       
+FC3_UNITS_ACTOR = 32       
 
 FC1_UNITS_CRITIC = 512       
 FC2_UNITS_CRITIC = 256       
@@ -250,7 +250,7 @@ class PortfolioAgent:
         decay_rate=DECAY_RATE,
         explore_stop=EXPLORE_STOP,
         tensordir="runs/portfolio/",
-        learn_freq=5,
+        learn_freq=10,
         plots=False,
         progress="tqdm",
         features_per_asset=0,  

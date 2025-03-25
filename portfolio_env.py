@@ -46,7 +46,8 @@ class PortfolioEnvironment:
         risk_free_rate=0.02,                   # Tasso risk-free annualizzato
         use_sortino=True,                      # Usare Sortino invece di Sharpe
         target_return=0.05,                    # Rendimento target per Sortino
-        rebalance_penalty=0.01                 # Penalità per ribilanciamento frequente
+        rebalance_penalty=0.01,                 # Penalità per ribilanciamento frequente
+        calendar=None
     ):
         # Salva i ticker da gestire
         self.tickers = tickers
@@ -64,6 +65,7 @@ class PortfolioEnvironment:
         self.squared_risk = squared_risk
         self.random_state = random_state
         self.penalty = penalty
+        self.calendar = calendar
         self.alpha = alpha
         self.beta = beta
         self.clip = clip
@@ -149,8 +151,8 @@ class PortfolioEnvironment:
             # Esempio con una lista predefinita di feature
             self.norm_columns = [
             "open", "volume", "change", "day", "week", "adjCloseGold", "adjCloseSpy",
-            "Credit_Spread", "Log_Close", "m_plus", "m_minus", "drawdown", "drawup",
-            "s_plus", "s_minus", "upper_bound", "lower_bound", "avg_duration", "avg_depth",
+            "Credit_Spread", #"Log_Close", 
+            "m_plus", "m_minus", "drawdown", "drawup", "s_plus", "s_minus", "upper_bound", "lower_bound", "avg_duration", "avg_depth",
             "cdar_95", "VIX_Close", "MACD", "MACD_Signal", "MACD_Histogram", "SMA5",
             "SMA10", "SMA15", "SMA20", "SMA25", "SMA30", "SMA36", "RSI5", "RSI14", "RSI20",
             "RSI25", "ADX5", "ADX10", "ADX15", "ADX20", "ADX25", "ADX30", "ADX35",
@@ -434,11 +436,8 @@ class PortfolioEnvironment:
     
     def get_state(self):
         """
-        Costruisce e restituisce lo stato completo del portafoglio.
-        Lo stato è composto da:
-        1. Feature normalizzate per ogni asset
-        2. Posizioni correnti per ogni asset
-        3. Metriche di portafoglio aggregate
+        Costruisce e restituisce lo stato completo del portafoglio,
+        incluse informazioni sugli eventi finanziari imminenti.
         """
         state_components = []
         
@@ -453,6 +452,35 @@ class PortfolioEnvironment:
         # 3. Aggiungi metriche di portafoglio aggregate
         portfolio_metrics = self.calculate_portfolio_metrics()
         state_components.extend(portfolio_metrics)
+        
+        # 4. Aggiungi feature del calendario finanziario se disponibile
+        # In portfolio_env.py, nella funzione get_state()
+
+        # Dopo aver aggiunto posizioni e metriche di portafoglio
+        if self.calendar is not None:
+            current_date = None
+            if all('date' in df.columns for df in self.dfs.values()):
+                current_date = list(self.dfs.values())[0]['date'].iloc[self.current_index]
+                
+            if current_date is not None:
+                # Ottieni feature dal calendario
+                calendar_features = self.calendar.get_event_features(current_date, self.tickers)
+                
+                # Normalizza e aggiungi allo stato
+                state_components.extend([
+                    min(calendar_features['high_importance_count'], 5) / 5.0,  # Max 5 eventi 'H'
+                    min(calendar_features['medium_importance_count'], 10) / 10.0,  # Max 10 eventi 'M'
+                    min(calendar_features['low_importance_count'], 15) / 15.0,  # Max 15 eventi 'L'
+                    1.0 - (calendar_features['days_to_next_high'] / 8.0),  # Più vicino = più alto
+                    1.0 - (calendar_features['days_to_next_any'] / 8.0),
+                    calendar_features['event_importance_weighted']
+                ])
+            else:
+                # Aggiungi zeri se non ci sono date
+                state_components.extend([0, 0, 0, 0, 0, 0])
+        else:
+            # Aggiungi zeri se non c'è calendario
+            state_components.extend([0, 0, 0, 0, 0, 0])
         
         return np.array(state_components)
     
@@ -628,29 +656,82 @@ class PortfolioEnvironment:
         self.portfolio_values_history.append(portfolio_value)
         self.cash_history.append(self.cash)
 
-        # NUOVA logica di reward - versione corretta senza amplificazione eccessiva
+        # In portfolio_env.py, nella funzione step()
+
+
+        # CORREZIONE: Logica di reward con incentivo alla diversificazione
         if portfolio_value_prev <= 0:
-            # Proteggi contro divisione per zero
-            percent_return = -0.05  # Valore negativo ma non eccessivo
+            percent_return = -0.0005
         else:
             percent_return = (portfolio_value - portfolio_value_prev) / portfolio_value_prev
-            # Limitiamo il valore per sicurezza
-            percent_return = np.clip(percent_return, -0.05, 0.05)  # Limita a +/- 5% per giorno
+            percent_return = np.clip(percent_return, -0.005, 0.005)
         
-        reward = percent_return  # Usa direttamente il rendimento percentuale
-
-        # Penalità transazioni come percentuale del valore
+        # Ricompensa base con leggero bias positivo
+        reward = percent_return + 0.0005
+        
+        # Riduciamo drasticamente la penalità per i costi di trading
         if portfolio_value_prev > 0:
-            trading_cost_penalty = trading_costs / portfolio_value_prev
+            trading_cost_penalty = min(0.00005, trading_costs / portfolio_value_prev * 0.01)
         else:
-            trading_cost_penalty = 0.001  # Valore predefinito ragionevole
-        
+            trading_cost_penalty = 0.00001
         reward -= trading_cost_penalty
+        
+        # NUOVO: Calcolo di diversificazione del portafoglio
+        # 1. Calcoliamo l'indice di Herfindahl normalizzato (più basso = più diversificato)
+        portfolio_weights = np.abs(self.positions)
+        total_weight = np.sum(portfolio_weights) + 1e-8  # Evita divisione per zero
+        if total_weight > 0:
+            normalized_weights = portfolio_weights / total_weight
+            herfindahl_index = np.sum(normalized_weights ** 2)
+            
+            # Convertiamo in un punteggio di diversificazione (più alto = più diversificato)
+            diversification_score = 1.0 - herfindahl_index
+            
+            # 2. Calcoliamo un bonus per distribuzione uniforme tra asset
+            ideal_weight = 1.0 / self.num_assets
+            weight_deviations = np.abs(normalized_weights - ideal_weight)
+            uniformity_score = 1.0 - np.mean(weight_deviations) * 2  # Scala da 0 a 1
+            
+            # 3. Combiniamo le metriche di diversificazione
+            diversification_bonus = (diversification_score * 0.6 + uniformity_score * 0.4) * 0.005 # Aumentato da 0.001 a 0.003
+            reward += diversification_bonus
+        
+        # Aggiungi una penalità per posizioni dominanti
+        max_position = np.max(np.abs(self.positions))
+        if max_position > 0.5:  # Se una posizione supera il 50% dell'esposizione
+            dominant_position_penalty = (max_position - 0.5) * 0.002
+            reward -= dominant_position_penalty
 
-        # Penalità soft per esposizione >100%
+        # Penalità molto lieve per esposizione eccessiva
         excess_exposure = max(np.sum(np.abs(self.positions)) - 1.0, 0.0)
-        reward -= excess_exposure * 0.01  # Fattore di penalità ridotto
+        reward -= excess_exposure * 0.0001
+        
+        # In portfolio_env.py, dentro la funzione step()
 
+        # Dopo aver calcolato la ricompensa base
+        if self.calendar is not None:
+            current_date = None
+            if all('date' in df.columns for df in self.dfs.values()):
+                current_date = list(self.dfs.values())[0]['date'].iloc[self.current_index]
+                
+            if current_date is not None:
+                # Ottieni eventi imminenti
+                upcoming_events = self.calendar.get_upcoming_events(current_date, lookahead=5, tickers=self.tickers)
+                
+                # Se ci sono eventi ad alta importanza nei prossimi giorni
+                high_importance_events = [e for e in upcoming_events if e['importance'] == 'H']
+                
+                if high_importance_events:
+                    # Incentiva movimenti di portafoglio più cauti prima di eventi importanti
+                    if np.sum(np.abs(actions)) < 0.05:  # Se le azioni sono conservative
+                        event_caution_bonus = 0.0005 * len(high_importance_events)
+                        reward += event_caution_bonus
+                    
+                    # Oppure, incentiva il de-risking prima di eventi importanti
+                    total_exposure = np.sum(np.abs(self.positions))
+                    if total_exposure < 0.5 * self.max_portfolio_pos:  # Se l'esposizione è ridotta
+                        reduced_exposure_bonus = 0.0003 * len(high_importance_events)
+                        reward += reduced_exposure_bonus
         return float(reward)
         
     def test(self, agent, model, total_episodes=100, random_states=None, noise_seeds=None):
@@ -742,7 +823,7 @@ class PortfolioEnvironment:
             avg_portfolio_value
         )
         
-    def denormalize_price(self, ticker, normalized_price, price_feature="Log_Close"):
+    def denormalize_price(self, ticker, normalized_price, price_feature="adjClose"):
         """
         Denormalizza un prezzo per un ticker specifico.
         
@@ -770,7 +851,7 @@ class PortfolioEnvironment:
         
         return denorm_price
     
-    def get_real_portfolio_metrics(self, price_feature="Log_Close"):
+    def get_real_portfolio_metrics(self, price_feature="adjClose"):
         """
         Calcola metriche di portafoglio con prezzi denormalizzati.
         

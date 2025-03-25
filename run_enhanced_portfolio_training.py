@@ -36,6 +36,15 @@ Arguments:
 # --use_adaptive_exploration 
 # --use_market_regimes --learning_setup fast
 
+#BASELINE FULL RUN WITH COMMISSION
+#py run_enhanced_portfolio_training.py --learning_setup full --output_dir results/baseline_full --episodes 3 --use_calendar --calendar_path calendar.csv
+
+#BASELINE FULL RUN WITHOUT COMMISSION
+#py run_enhanced_portfolio_training.py --learning_setup full --output_dir results/baseline_full --episodes 3 --free_trades 10000000 --commission_rate 0.0 --use_calendar --calendar_path calendar.csv
+
+#INTEGRAZIONE CALENDAR
+#py run_enhanced_portfolio_training.py --learning_setup full --output_dir results/calendar_training --episodes 3 --use_calendar --calendar_path calendar.csv
+
 import os
 import torch
 import numpy as np
@@ -54,6 +63,7 @@ from market_regime import MarketRegimeDetector
 from financial_calendar import FinancialCalendar
 from portfolio_construction import HybridPortfolioConstructor
 from backtesting import BacktestFramework
+from financial_calendar import FinancialCalendar
 
 # List of tickers to use in the portfolio
 TICKERS = ["ARKG", "IBB", "IHI", "IYH", "XBI", "VHT"]
@@ -339,8 +349,8 @@ def create_enhanced_agent(args, num_assets, max_steps, features_per_asset, outpu
         'memory_type': "prioritized",
         'batch_size': 256,
         'max_step': max_steps,
-        'theta': 0.1,
-        'sigma': 0.2,
+        'theta': 0.03,
+        'sigma': 0.05,
         'use_enhanced_actor': True,
         'use_batch_norm': True
     }
@@ -371,6 +381,13 @@ def create_enhanced_environment(args, valid_tickers, aligned_dfs_train, norm_par
     """
     Create the portfolio environment with enhanced features based on argument flags.
     """
+    calendar = None
+    if args.use_calendar and args.calendar_path and os.path.exists(args.calendar_path):
+        print(f"Loading financial calendar from {args.calendar_path}...")
+        from financial_calendar import FinancialCalendar
+        calendar = FinancialCalendar(args.calendar_path)
+        print(f"Loaded events from calendar.")
+    
     # Base configuration
     env_config = {
         'tickers': valid_tickers,
@@ -380,8 +397,8 @@ def create_enhanced_environment(args, valid_tickers, aligned_dfs_train, norm_par
         'lambd': 0.05,
         'psi': 0.2,
         'cost': "trade_l1",
-        'max_pos_per_asset': 2.0,
-        'max_portfolio_pos': 6.0,
+        'max_pos_per_asset': 0.5,
+        'max_portfolio_pos': 3.0,
         'squared_risk': False,
         'penalty': "tanh",
         'alpha': 3,
@@ -402,7 +419,8 @@ def create_enhanced_environment(args, valid_tickers, aligned_dfs_train, norm_par
         'initial_capital': 100000,
         'risk_free_rate': 0.02,
         'use_sortino': True,
-        'target_return': 0.05
+        'target_return': 0.05,
+        'calendar':calendar
     }
     
     # Create the environment with the configuration
@@ -415,14 +433,14 @@ def create_enhanced_environment(args, valid_tickers, aligned_dfs_train, norm_par
         # not directly in environment initialization
         
     # If using financial calendar, set it up
-    if args.use_calendar and args.calendar_path:
-        if os.path.exists(args.calendar_path):
-            print(f"Loading financial calendar from {args.calendar_path}...")
-            calendar = FinancialCalendar(args.calendar_path)
-            # Store this for use in the training loop
-        else:
-            print(f"WARNING: Calendar file {args.calendar_path} not found. Proceeding without calendar.")
-            args.use_calendar = False
+    calendar = None
+    if args.use_calendar and args.calendar_path and os.path.exists(args.calendar_path):
+        print(f"Loading financial calendar from {args.calendar_path}...")
+        calendar = FinancialCalendar(args.calendar_path)
+        print(f"Loaded {sum(len(events) for events in calendar.events.values())} events")
+    else:
+        print("Calendar not found or not enabled. Running without calendar integration.")
+
     
     # Save the environment configuration (omitting non-serializable parts)
     env_config_path = f'{output_dir}\\env_config.json'
@@ -550,6 +568,9 @@ def main(args):
         norm_params_paths, max_steps, output_dir
     )
     
+    # 2b. Inizializza con posizioni neutre invece che casuali
+    env.positions = np.zeros(env.num_assets)
+
     # 3. Initialize the enhanced agent
     print("Initializing the enhanced portfolio agent...")
     num_assets = len(valid_tickers)
@@ -565,8 +586,15 @@ def main(args):
     if args.use_market_regimes:
         regime_detector = MarketRegimeDetector(window_size=60, n_regimes=3)
     
-    if args.use_calendar and args.calendar_path and os.path.exists(args.calendar_path):
-        calendar = FinancialCalendar(args.calendar_path)
+    if args.use_calendar:
+        calendar_path = args.calendar_path
+        if os.path.exists(calendar_path):
+            print(f"Loading financial calendar from {calendar_path}...")
+            calendar = FinancialCalendar(calendar_path)
+            print(f"Loaded {sum(len(events) for events in calendar.events.values())} events")
+        else:
+            print(f"WARNING: Calendar file {calendar_path} not found. Running without calendar.")
+
     
     # 5. Create a dictionary of which enhancements are being used
     enhancement_config = {
@@ -617,7 +645,7 @@ def main(args):
             'total_episodes': args.episodes,
             'tau_actor': 0.01,
             'tau_critic': 0.01,
-            'lr_actor': 5e-6,
+            'lr_actor': 1e-6,
             'lr_critic': 5e-5,
             'weight_decay_actor': 1e-6,
             'weight_decay_critic': 1e-5,
@@ -922,25 +950,99 @@ def main(args):
                 test_rewards = []
                 test_cvars = []
                 
+                # Nella parte di test, dopo aver caricato il modello
+                print("\nInizio valutazione dettagliata sul dataset di test...")
+                test_env.reset()
+                state = test_env.get_state()
+                done = test_env.done
+
+                # Crea strutture dati per il logging
+                action_log = []
+                position_log = []
+                portfolio_value_log = []
+                rewards_log = []
+
+                step_counter = 0
+                significant_trade_counter = 0
+
                 while not done:
                     with torch.no_grad():
                         actions = agent.act(state, noise=False)
+                    
+                    # Log prima dell'azione
+                    if step_counter % 20 == 0 or np.any(np.abs(actions) > 0.1):  # Log ogni 20 step o per azioni significative
+                        print(f"\nStep {step_counter}:")
+                        print(f"Posizioni correnti: {test_env.positions}")
+                        print(f"Azioni: {actions}")
+                        print(f"Portfolio value: ${test_env.get_portfolio_value():.2f}")
                     
                     reward = test_env.step(actions)
                     state = test_env.get_state()
                     done = test_env.done
                     
-                    test_rewards.append(reward)
-                    test_cvars.append(test_env.calculate_conditional_value_at_risk())
-                
-                # Print final results
+                    # Registra se l'operazione era significativa
+                    if np.any(np.abs(actions) > 0.05):
+                        significant_trade_counter += 1
+                    
+                    # Salva i log
+                    action_log.append(actions)
+                    position_log.append(test_env.positions.copy())
+                    portfolio_value_log.append(test_env.get_portfolio_value())
+                    rewards_log.append(reward)
+                    
+                    step_counter += 1
+
+                # Stampa riepilogo delle operazioni
+                print("\n===== RIEPILOGO STRATEGIE =====")
+                print(f"Numero totale di step: {step_counter}")
+                print(f"Numero di operazioni significative: {significant_trade_counter}")
+                print(f"Percentuale di step con trading: {significant_trade_counter/step_counter*100:.2f}%")
+
+                # Analisi delle posizioni
+                avg_positions = np.mean(position_log, axis=0)
+                max_positions = np.max(position_log, axis=0)
+                min_positions = np.min(position_log, axis=0)
+
+                print("\n===== ANALISI POSIZIONI =====")
+                print("Asset\tMedia\tMax\tMin")
+                for i, ticker in enumerate(test_env.tickers):
+                    print(f"{ticker}\t{avg_positions[i]:.4f}\t{max_positions[i]:.4f}\t{min_positions[i]:.4f}")
+
+                # Calcola la correlazione tra le posizioni
+                if len(position_log) > 5:
+                    position_data = np.array(position_log)
+                    print("\n===== CORRELAZIONI TRA POSIZIONI =====")
+                    corr_matrix = np.corrcoef(position_data.T)
+                    for i in range(len(test_env.tickers)):
+                        for j in range(i+1, len(test_env.tickers)):
+                            if not np.isnan(corr_matrix[i, j]):
+                                print(f"Correlazione {test_env.tickers[i]}-{test_env.tickers[j]}: {corr_matrix[i, j]:.4f}")
+
+                # Analizza se l'agente sta effettivamente facendo trading o rimanendo inattivo
+                print("\n===== ATTIVITÀ DI TRADING =====")
+                variance_positions = np.var(position_log, axis=0)
+                print(f"Varianza delle posizioni: {variance_positions}")
+                if np.all(variance_positions < 0.01):
+                    print("ATTENZIONE: L'agente è praticamente inattivo - varianza di posizione troppo bassa")
+                    
+                # Analisi di diversificazione
+                print("\n===== METRICHE DI DIVERSIFICAZIONE =====")
+                avg_abs_positions = np.mean(np.abs(position_log), axis=0)
+                if np.all(avg_abs_positions < 0.05):
+                    print("ATTENZIONE: Agente troppo conservativo - posizioni medie troppo piccole")
+                elif np.sum(avg_abs_positions > 0.5) == 1:
+                    print("ATTENZIONE: Scarsa diversificazione - una posizione domina")
+                else:
+                    concentration = np.sum(avg_abs_positions**2) / (np.sum(avg_abs_positions)**2)
+                    print(f"Indice di concentrazione: {concentration:.4f} (valori più bassi = maggiore diversificazione)")
+
+                # Stampa risultati finali
                 metrics = test_env.get_real_portfolio_metrics()
-                print("\nTest Results:")
-                print(f"Total Return: {metrics['total_return']:.2f}%")
-                print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
-                print(f"Max Drawdown: {metrics['max_drawdown']:.2f}%")
-                print(f"Final Portfolio Value: ${metrics['final_portfolio_value']:.2f}")
-                print(f"Average CVaR: {np.mean(test_cvars):.4f}")
+                print("\n===== RISULTATI FINALI =====")
+                print(f"Rendimento totale: {metrics['total_return']:.2f}%")
+                print(f"Sharpe ratio: {metrics['sharpe_ratio']:.2f}")
+                print(f"Max drawdown: {metrics['max_drawdown']:.2f}%")
+                print(f"Valore finale portafoglio: ${metrics['final_portfolio_value']:.2f}")
                 
                 # If using market regimes, analyze performance by regime
                 if args.use_market_regimes and regime_detector is not None:
@@ -998,7 +1100,7 @@ if __name__ == "__main__":
                       help='Use backtesting framework for evaluation')
     
     # Configuration parameters
-    parser.add_argument('--calendar_path', type=str, default=None,
+    parser.add_argument('--calendar_path', type=str, default='calendar.csv',
                       help='Path to financial events calendar CSV')
     parser.add_argument('--test_ratio', type=float, default=0.2,
                       help='Ratio of data to use for testing')
