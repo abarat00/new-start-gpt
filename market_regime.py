@@ -1,6 +1,6 @@
 # New file: market_regime.py
 import numpy as np
-
+from hmmlearn import hmm
 
 class MarketRegimeDetector:
     def __init__(self, window_size=60, n_regimes=3):

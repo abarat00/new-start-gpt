@@ -46,18 +46,6 @@ DECAY_RATE = 1e-6
 EXPLORE_STOP = 0.1           
 
 # Modify in portfolio_agent.py
-class AdaptiveExploration(MultiAssetOUNoise):
-    def __init__(self, action_size, mu=0.0, theta=0.1, sigma=0.2, min_sigma=0.05):
-        super().__init__(action_size, mu, theta, sigma)
-        self.min_sigma = min_sigma
-        self.original_sigma = sigma
-        
-    def adapt_sigma(self, performance_metric, target_metric=0.2):
-        """Adapt exploration noise based on performance."""
-        # Increase exploration when underperforming
-        ratio = target_metric / (performance_metric + 1e-8)
-        self.sigma = max(self.min_sigma, self.original_sigma * min(ratio, 3.0))
-        return self.sigma
 
 class MultiAssetOUNoise:
     """
@@ -94,6 +82,20 @@ class MultiAssetOUNoise:
             self.state = x + dx
             noise = self.state
         return noise
+
+class AdaptiveExploration(MultiAssetOUNoise):
+    def __init__(self, action_size, mu=0.0, theta=0.1, sigma=0.2, min_sigma=0.05):
+        super().__init__(action_size, mu, theta, sigma)
+        self.min_sigma = min_sigma
+        self.original_sigma = sigma
+        
+    def adapt_sigma(self, performance_metric, target_metric=0.2):
+        """Adapt exploration noise based on performance."""
+        # Increase exploration when underperforming
+        ratio = target_metric / (performance_metric + 1e-8)
+        self.sigma = max(self.min_sigma, self.original_sigma * min(ratio, 3.0))
+        return self.sigma
+
 
 class PortfolioAgent:
     def __init__(

@@ -1,4 +1,7 @@
 # New file: financial_calendar.py
+import pandas as pd
+
+
 class FinancialCalendar:
     def __init__(self, data_path=None):
         self.events = {}

@@ -47,39 +47,6 @@ class DistributionalCritic(nn.Module):
         expected_value = (probabilities * self.supports).sum(dim=1, keepdim=True)
         return expected_value
 
-# Add to portfolio_models.py
-class MAMLPortfolioActor(EnhancedPortfolioActor):
-    def __init__(self, *args, **kwargs):
-        super(MAMLPortfolioActor, self).__init__(*args, **kwargs)
-        self.meta_lr = kwargs.get('meta_lr', 0.001)
-        
-    def adapt(self, states, rewards, lr=0.01):
-        """Quick adaptation to new market data."""
-        states_tensor = torch.FloatTensor(states).to(self.device)
-        
-        # Store original parameters
-        original_params = {name: param.clone() for name, param in self.named_parameters()}
-        
-        # Perform one gradient step
-        actions = self.forward(states_tensor)
-        
-        # Assuming reward is a differentiable function of actions
-        pseudo_loss = -torch.mean(actions * torch.FloatTensor(rewards).unsqueeze(1).to(self.device))
-        
-        # Manual gradient step
-        grads = torch.autograd.grad(pseudo_loss, self.parameters(), create_graph=True)
-        
-        # Update parameters temporarily
-        for (name, param), grad in zip(self.named_parameters(), grads):
-            param.data = param.data - lr * grad
-            
-        return original_params
-    
-    def restore_params(self, original_params):
-        """Restore original parameters."""
-        for name, param in self.named_parameters():
-            param.data = original_params[name]
-
 class PortfolioCritic(nn.Module):
     def __init__(self, state_size, action_size, seed=0, fcs1_units=256, fc2_units=128, fc3_units=64, use_batch_norm=True):
         super(PortfolioCritic, self).__init__()
@@ -289,3 +256,36 @@ class EnhancedPortfolioActor(nn.Module):
         x = F.relu(self.ln1(self.fc1(encoded_state)))
         x = F.relu(self.ln2(self.fc2(x)))
         return self.fc3(x)
+    
+# Add to portfolio_models.py
+class MAMLPortfolioActor(EnhancedPortfolioActor):
+    def __init__(self, *args, **kwargs):
+        super(MAMLPortfolioActor, self).__init__(*args, **kwargs)
+        self.meta_lr = kwargs.get('meta_lr', 0.001)
+        
+    def adapt(self, states, rewards, lr=0.01):
+        """Quick adaptation to new market data."""
+        states_tensor = torch.FloatTensor(states).to(self.device)
+        
+        # Store original parameters
+        original_params = {name: param.clone() for name, param in self.named_parameters()}
+        
+        # Perform one gradient step
+        actions = self.forward(states_tensor)
+        
+        # Assuming reward is a differentiable function of actions
+        pseudo_loss = -torch.mean(actions * torch.FloatTensor(rewards).unsqueeze(1).to(self.device))
+        
+        # Manual gradient step
+        grads = torch.autograd.grad(pseudo_loss, self.parameters(), create_graph=True)
+        
+        # Update parameters temporarily
+        for (name, param), grad in zip(self.named_parameters(), grads):
+            param.data = param.data - lr * grad
+            
+        return original_params
+    
+    def restore_params(self, original_params):
+        """Restore original parameters."""
+        for name, param in self.named_parameters():
+            param.data = original_params[name]

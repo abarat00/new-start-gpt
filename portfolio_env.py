@@ -628,16 +628,28 @@ class PortfolioEnvironment:
         self.portfolio_values_history.append(portfolio_value)
         self.cash_history.append(self.cash)
 
-        # NUOVA logica di reward
-        percent_return = (portfolio_value - portfolio_value_prev) / portfolio_value_prev
-        reward = percent_return * 100  # scala in percentuale
+        # NUOVA logica di reward - versione corretta senza amplificazione eccessiva
+        if portfolio_value_prev <= 0:
+            # Proteggi contro divisione per zero
+            percent_return = -0.05  # Valore negativo ma non eccessivo
+        else:
+            percent_return = (portfolio_value - portfolio_value_prev) / portfolio_value_prev
+            # Limitiamo il valore per sicurezza
+            percent_return = np.clip(percent_return, -0.05, 0.05)  # Limita a +/- 5% per giorno
+        
+        reward = percent_return  # Usa direttamente il rendimento percentuale
 
-        # penalità transazioni ridotta
-        reward -= trading_costs * 100
+        # Penalità transazioni come percentuale del valore
+        if portfolio_value_prev > 0:
+            trading_cost_penalty = trading_costs / portfolio_value_prev
+        else:
+            trading_cost_penalty = 0.001  # Valore predefinito ragionevole
+        
+        reward -= trading_cost_penalty
 
-        # penalità soft per esposizione >100%
+        # Penalità soft per esposizione >100%
         excess_exposure = max(np.sum(np.abs(self.positions)) - 1.0, 0.0)
-        reward -= excess_exposure * 10
+        reward -= excess_exposure * 0.01  # Fattore di penalità ridotto
 
         return float(reward)
         
