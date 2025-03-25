@@ -8,6 +8,78 @@ def hidden_init(layer):
     lim = 1.0 / np.sqrt(fan_in)
     return (-lim, lim)
 
+# Add to portfolio_models.py
+class DistributionalCritic(nn.Module):
+    def __init__(self, state_size, action_size, n_atoms=51, v_min=-10, v_max=10, seed=0):
+        super(DistributionalCritic, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.n_atoms = n_atoms
+        self.v_min = v_min
+        self.v_max = v_max
+        
+        self.supports = torch.linspace(v_min, v_max, n_atoms).cuda()
+        self.delta = (v_max - v_min) / (n_atoms - 1)
+        
+        # Network architecture
+        self.fc1 = nn.Linear(state_size + action_size, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, n_atoms)  # Output distribution
+        
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        self.fc1.weight.data.uniform_(*hidden_init(self.fc1))
+        self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
+        self.fc3.weight.data.uniform_(-3e-4, 3e-4)
+    
+    def forward(self, state, action):
+        """Returns distribution over possible Q-values"""
+        x = torch.cat((state, action), dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        logits = self.fc3(x)
+        probabilities = F.softmax(logits, dim=1)
+        return probabilities
+    
+    def get_expected_value(self, state, action):
+        """Returns expected Q-value from distribution"""
+        probabilities = self.forward(state, action)
+        expected_value = (probabilities * self.supports).sum(dim=1, keepdim=True)
+        return expected_value
+
+# Add to portfolio_models.py
+class MAMLPortfolioActor(EnhancedPortfolioActor):
+    def __init__(self, *args, **kwargs):
+        super(MAMLPortfolioActor, self).__init__(*args, **kwargs)
+        self.meta_lr = kwargs.get('meta_lr', 0.001)
+        
+    def adapt(self, states, rewards, lr=0.01):
+        """Quick adaptation to new market data."""
+        states_tensor = torch.FloatTensor(states).to(self.device)
+        
+        # Store original parameters
+        original_params = {name: param.clone() for name, param in self.named_parameters()}
+        
+        # Perform one gradient step
+        actions = self.forward(states_tensor)
+        
+        # Assuming reward is a differentiable function of actions
+        pseudo_loss = -torch.mean(actions * torch.FloatTensor(rewards).unsqueeze(1).to(self.device))
+        
+        # Manual gradient step
+        grads = torch.autograd.grad(pseudo_loss, self.parameters(), create_graph=True)
+        
+        # Update parameters temporarily
+        for (name, param), grad in zip(self.named_parameters(), grads):
+            param.data = param.data - lr * grad
+            
+        return original_params
+    
+    def restore_params(self, original_params):
+        """Restore original parameters."""
+        for name, param in self.named_parameters():
+            param.data = original_params[name]
+
 class PortfolioCritic(nn.Module):
     def __init__(self, state_size, action_size, seed=0, fcs1_units=256, fc2_units=128, fc3_units=64, use_batch_norm=True):
         super(PortfolioCritic, self).__init__()

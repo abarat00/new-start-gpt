@@ -174,7 +174,71 @@ class PortfolioEnvironment:
         
         # Flag episodio terminato
         self.done = False
-                
+
+    # Add to portfolio_env.py
+    def calculate_optimal_trading_size(self, target_position, current_position, price, liquidity_factor=0.1):
+        """
+        Calculate the optimal trading size considering transaction costs and market impact.
+        """
+        # Simple formula based on Almgren-Chriss model
+        position_diff = target_position - current_position
+        
+        # Skip tiny trades
+        if abs(position_diff) < 1e-4:
+            return 0
+        
+        # Consider market impact (larger for less liquid assets)
+        market_impact = liquidity_factor * abs(position_diff) * price
+        commission = max(self.min_commission, self.commission_rate * abs(position_diff) * price)
+        
+        # If cost is too high relative to expected benefit, reduce trade size
+        if market_impact + commission > abs(position_diff) * price * 0.01:  # 1% threshold
+            reduced_size = 0.5 * position_diff  # Trade only half the desired amount
+            return reduced_size
+        
+        return position_diff
+    
+    # Add to portfolio_env.py 
+    def calculate_conditional_value_at_risk(self, confidence_level=0.95):
+        """
+        Calculate Conditional Value at Risk (CVaR) for the portfolio.
+        This provides a more robust risk measure than simple volatility.
+        """
+        if len(self.portfolio_values_history) < 30:
+            return 0.0
+            
+        returns = np.diff(self.portfolio_values_history) / self.portfolio_values_history[:-1]
+        sorted_returns = np.sort(returns)
+        cutoff_index = int((1 - confidence_level) * len(sorted_returns))
+        return np.mean(sorted_returns[:cutoff_index])
+    
+    # Add to portfolio_env.py
+    def calculate_cross_asset_features(self):
+        """Generate features that capture relationships between assets."""
+        cross_features = []
+        
+        # Calculate correlations between pairs of assets
+        for i, ticker_i in enumerate(self.tickers):
+            for j, ticker_j in enumerate(self.tickers):
+                if i < j:  # Only calculate each pair once
+                    if len(self.returns_history[ticker_i]) > 30 and len(self.returns_history[ticker_j]) > 30:
+                        corr = np.corrcoef(
+                            self.returns_history[ticker_i][-30:], 
+                            self.returns_history[ticker_j][-30:]
+                        )[0,1]
+                        cross_features.append(corr)
+                    else:
+                        cross_features.append(0)
+        
+        # Calculate dispersion metrics
+        returns = [self.returns_history[ticker][-1] if len(self.returns_history[ticker]) > 0 else 0 
+                for ticker in self.tickers]
+        
+        cross_features.append(np.std(returns))  # Return dispersion
+        cross_features.append(max(returns) - min(returns))  # Range
+        
+        return cross_features
+
     def update_raw_states(self, current_index):
         """
         Aggiorna gli stati grezzi per tutti gli asset utilizzando i DataFrame.
